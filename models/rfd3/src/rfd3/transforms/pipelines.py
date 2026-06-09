@@ -103,6 +103,9 @@ from rfd3.transforms.util_transforms import (
 )
 from rfd3.transforms.virtual_atoms import PadTokensWithVirtualAtoms
 
+# ★ 追加
+from rfd3.transforms.function_text_transforms import AddFunctionTextEmbedding
+
 from foundry.common import exists
 
 ######################################################################################
@@ -357,6 +360,9 @@ def build_atom14_base_pipeline_(
     max_ss_frac_to_provide: float,
     min_ss_island_len: int,
     max_ss_island_len: int,
+    # ★ 追加
+    function_text_annotation_path: str | None = None,
+    function_text_embedding_cache_path: str | None = None,
     **_,  # dump additional kwargs (e.g. msa stuff)
 ):
     """
@@ -481,6 +487,18 @@ def build_atom14_base_pipeline_(
                 },
             )
         ),
+
+        # ★ ここに追加 ──────────────────────────────────────────
+        TrainingRoute(
+            AddFunctionTextEmbedding(
+                annotation_path=function_text_annotation_path,
+                embedding_cache_path=function_text_embedding_cache_path,
+                dropout_prob=0.1,
+            )
+        ),
+        # ────────────────────────────────────────────────────────
+
+
         # ... AF3 token level encoding with sequence masking
         EncodeAF3TokenLevelFeatures(
             sequence_encoding=af3_sequence_encoding, encode_residues_to=GAP

@@ -95,3 +95,7 @@ global_transform_args:
     # PPI
     add_ppi_hotspots: 0.75
     full_binder_crop: 0.75
+
+    # ★ 追加
+    function_text_annotation_path: /data/rfd3/interpro_annotations.json
+    function_text_embedding_cache_path: /data/rfd3/embeddings_cache.pt
