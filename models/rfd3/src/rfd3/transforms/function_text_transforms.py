@@ -407,26 +407,50 @@ def build_annotation_db(
     uniprot_to_interpro: dict[str, list[dict]] = {}
     unique_uniprot_ids = set(pdb_to_uniprot.values())
 
-    for i, uid in enumerate(sorted(unique_uniprot_ids)):
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    uid_iter = sorted(unique_uniprot_ids)
+    iterable = _tqdm(uid_iter, desc="InterPro API", unit="uid") if _tqdm else uid_iter
+
+    for i, uid in enumerate(iterable):
         if uid in uniprot_to_interpro:
             continue
         url = f"https://www.ebi.ac.uk/interpro/api/entry/all/protein/UniProt/{uid}/"
         try:
             resp = requests.get(url, timeout=30)
+            if resp.status_code == 404:
+                uniprot_to_interpro[uid] = []
+                continue
             resp.raise_for_status()
+            if not resp.text.strip():
+                uniprot_to_interpro[uid] = []
+                continue
             payload = resp.json()
             hits = []
             for result in payload.get("results", []):
                 meta = result.get("metadata", {})
+                name_field = meta.get("name", "")
+                name = (
+                    name_field.get("name", "")
+                    if isinstance(name_field, dict)
+                    else str(name_field)
+                )
+                desc_field = meta.get("description")
+                if isinstance(desc_field, list) and desc_field:
+                    first = desc_field[0]
+                    description = (
+                        first.get("text", "") if isinstance(first, dict) else str(first)
+                    )
+                else:
+                    description = ""
                 hits.append(
                     {
                         "id": meta.get("accession", ""),
-                        "name": meta.get("name", {}).get("name", ""),
-                        "description": meta.get("description", [{}])[0].get(
-                            "text", ""
-                        )
-                        if meta.get("description")
-                        else "",
+                        "name": name,
+                        "description": description,
                     }
                 )
             uniprot_to_interpro[uid] = hits
@@ -463,17 +487,22 @@ def precompute_embeddings(
     encoder_name: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
     batch_size: int = 64,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    checkpoint_every: int = 5000,
 ) -> None:
     """
     annotation JSON 内の全エントリの埋め込みを事前計算して .pt ファイルに保存する。
     学習時はこのキャッシュを参照することで BERT の推論コストをゼロにできる。
 
+    出力ファイルが既に存在する場合は再開（resume）する。
+    checkpoint_every バッチごとに途中保存するので中断しても安全。
+
     Args:
-        annotation_path: build_annotation_db() で作成した JSON のパス。
-        output_path    : 出力キャッシュ (.pt) のパス。
-        encoder_name   : HuggingFace モデル名。
-        batch_size     : エンコード時のバッチサイズ。
-        device         : GPU が使えるなら "cuda" を推奨（事前計算時のみ）。
+        annotation_path : build_annotation_db() で作成した JSON のパス。
+        output_path     : 出力キャッシュ (.pt) のパス。
+        encoder_name    : HuggingFace モデル名。
+        batch_size      : エンコード時のバッチサイズ。
+        device          : GPU が使えるなら "cuda" を推奨（事前計算時のみ）。
+        checkpoint_every: この件数（エントリ数）ごとに途中保存する。
 
     Usage:
         python -c "
@@ -481,10 +510,23 @@ def precompute_embeddings(
         precompute_embeddings(
             annotation_path='interpro_annotations.json',
             output_path='embeddings_cache.pt',
+            batch_size=256,
+            device='cuda',
         )
         "
     """
     from transformers import AutoModel, AutoTokenizer
+
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    if not logging.root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
 
     annotation_path = Path(annotation_path)
     output_path = Path(output_path)
@@ -492,27 +534,41 @@ def precompute_embeddings(
     with open(annotation_path) as f:
         annotations = json.load(f)
 
+    # 既存キャッシュがあれば読み込んで再開
+    if output_path.exists():
+        cache: dict[str, torch.Tensor] = torch.load(output_path, map_location="cpu")
+        logger.info(f"既存キャッシュを再開: {len(cache):,} エントリ読み込み済み")
+    else:
+        cache = {}
+
+    # 未処理キーのみ対象にする
+    all_keys = list(annotations.keys())
+    keys = [k for k in all_keys if k not in cache]
+    logger.info(
+        f"総エントリ: {len(all_keys):,} / 未処理: {len(keys):,} / 済み: {len(cache):,}"
+    )
+
+    if not keys:
+        logger.info("全エントリ処理済みです。")
+        return
+
     tokenizer = AutoTokenizer.from_pretrained(encoder_name)
     encoder = AutoModel.from_pretrained(encoder_name).eval().to(device)
     for param in encoder.parameters():
         param.requires_grad = False
 
-    # ヘルパー: description 文字列を組み立てる
     def _build_text(entry: dict) -> str:
         parts = []
         for hit in entry.get("interpro", []):
-            name = hit.get("name", "").strip()
-            desc = hit.get("description", "").strip()
+            name = (hit.get("name") or "").strip()
+            desc = (hit.get("description") or "").strip()
             if name and desc:
                 parts.append(f"{name}: {desc}")
             elif name:
                 parts.append(name)
         return " | ".join(parts)
 
-    keys = list(annotations.keys())
     texts = [_build_text(annotations[k]) for k in keys]
-
-    cache: dict[str, torch.Tensor] = {}
 
     @torch.no_grad()
     def _encode_batch(batch_texts: list[str]) -> torch.Tensor:
@@ -526,17 +582,184 @@ def precompute_embeddings(
         outputs = encoder(**inputs)
         return outputs.last_hidden_state[:, 0, :].cpu()
 
-    for start in range(0, len(keys), batch_size):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    batches = range(0, len(keys), batch_size)
+    iterable = _tqdm(batches, desc="Precompute embeddings", unit="batch") if _tqdm else batches
+
+    for batch_idx, start in enumerate(iterable):
         batch_keys = keys[start : start + batch_size]
         batch_texts = texts[start : start + batch_size]
-        embs = _encode_batch(batch_texts)  # (B, 768)
+        embs = _encode_batch(batch_texts)
         for key, emb in zip(batch_keys, embs):
             cache[key] = emb
-        if start % 5000 == 0:
-            logger.info(f"  {start:,} / {len(keys):,} エントリ処理完了")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        processed = start + len(batch_keys)
+        if processed % checkpoint_every == 0 or processed == len(keys):
+            torch.save(cache, output_path)
+            logger.info(
+                f"チェックポイント保存: {processed:,} / {len(keys):,} エントリ → {output_path}"
+            )
+
     torch.save(cache, output_path)
     logger.info(
         f"埋め込みキャッシュを保存しました: {output_path} ({len(cache):,} エントリ)"
+    )
+
+
+# =============================================================================
+# 前処理スクリプト 3: 失敗エントリの再試行
+# =============================================================================
+
+
+def retry_failed_annotations(
+    annotation_path: str | Path,
+    interpro_api_pause: float = 1.0,
+    max_retries: int = 5,
+    checkpoint_every: int = 200,
+) -> None:
+    """
+    build_annotation_db() で通信失敗により ``"interpro": []`` になったエントリを
+    再試行し、annotation JSON を上書き更新する。
+
+    404（アノテーション本来なし）と通信エラーを区別し、
+    404 は再試行対象から除外する。
+    指数バックオフ付きリトライで安定性を高める。
+
+    Args:
+        annotation_path:
+            build_annotation_db() が出力した JSON のパス（上書き更新される）。
+        interpro_api_pause:
+            リクエスト間の基本待機秒数（デフォルト 1.0 秒）。
+        max_retries:
+            1 ID あたりの最大リトライ回数。
+        checkpoint_every:
+            この件数ごとに途中保存する。
+
+    Usage:
+        from rfd3.transforms.function_text_transforms import retry_failed_annotations
+        retry_failed_annotations(
+            annotation_path="/path/to/interpro_annotations.json",
+        )
+    """
+    import time
+
+    import requests
+
+    if not logging.root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
+
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    annotation_path = Path(annotation_path)
+    with open(annotation_path) as f:
+        db: dict[str, dict] = json.load(f)
+
+    # interpro が空のエントリから UniProt ID を収集（重複除去）
+    uid_to_keys: dict[str, list[str]] = {}
+    for key, entry in db.items():
+        if not entry.get("interpro"):
+            uid = entry.get("uniprot_id", "")
+            if uid:
+                uid_to_keys.setdefault(uid, []).append(key)
+
+    unique_uids = sorted(uid_to_keys)
+    logger.info(
+        f"再試行対象: {len(unique_uids):,} UniProt ID "
+        f"({sum(len(v) for v in uid_to_keys.values()):,} PDB エントリ)"
+    )
+
+    def _fetch_interpro(uid: str) -> Optional[list[dict]]:
+        """成功時はヒットリスト、404 は None（確定空）、失敗は例外を raise。"""
+        url = (
+            f"https://www.ebi.ac.uk/interpro/api/entry/all/protein/UniProt/{uid}/"
+        )
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 404:
+            return None  # 確定的に空
+        resp.raise_for_status()
+        if not resp.text.strip():
+            return []
+        payload = resp.json()
+        hits = []
+        for result in payload.get("results", []):
+            meta = result.get("metadata", {})
+            name_field = meta.get("name", "")
+            name = (
+                name_field.get("name", "")
+                if isinstance(name_field, dict)
+                else str(name_field)
+            )
+            desc_field = meta.get("description")
+            if isinstance(desc_field, list) and desc_field:
+                first = desc_field[0]
+                description = (
+                    first.get("text", "") if isinstance(first, dict) else str(first)
+                )
+            else:
+                description = ""
+            hits.append(
+                {
+                    "id": meta.get("accession", ""),
+                    "name": name,
+                    "description": description,
+                }
+            )
+        return hits
+
+    updated = 0
+    confirmed_empty = 0
+    still_failed = 0
+
+    iterable = _tqdm(unique_uids, desc="Retry InterPro", unit="uid") if _tqdm else unique_uids
+
+    for i, uid in enumerate(iterable):
+        hits: Optional[list[dict]] = None
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(max_retries):
+            try:
+                hits = _fetch_interpro(uid)
+                break
+            except Exception as exc:
+                last_exc = exc
+                backoff = interpro_api_pause * (2 ** attempt)
+                time.sleep(backoff)
+
+        if hits is None and last_exc is None:
+            # 404: 確定的に空
+            confirmed_empty += 1
+        elif hits is not None:
+            # 成功: 全関連 PDB エントリを更新
+            for key in uid_to_keys[uid]:
+                db[key]["interpro"] = hits
+            if hits:
+                updated += len(uid_to_keys[uid])
+        else:
+            # 全リトライ失敗
+            logger.warning(f"再試行失敗 ({uid}): {last_exc}")
+            still_failed += 1
+
+        time.sleep(interpro_api_pause)
+
+        # 途中保存
+        if (i + 1) % checkpoint_every == 0:
+            with open(annotation_path, "w") as f:
+                json.dump(db, f)
+            logger.info(
+                f"  チェックポイント保存 ({i + 1:,}/{len(unique_uids):,}) "
+                f"更新={updated:,} 確定空={confirmed_empty:,} 失敗={still_failed:,}"
+            )
+
+    with open(annotation_path, "w") as f:
+        json.dump(db, f)
+    logger.info(
+        f"完了: 更新={updated:,} 確定空={confirmed_empty:,} "
+        f"再試行失敗={still_failed:,} → {annotation_path}"
     )
