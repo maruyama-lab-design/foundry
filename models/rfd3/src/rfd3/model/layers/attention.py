@@ -18,6 +18,26 @@ from rfd3.model.layers.layer_utils import (
 )
 
 from foundry.common import exists
+
+
+class LoRALinear(nn.Module):
+    """linearNoBias に低ランクアダプタ (LoRA) を追加したモジュール。
+
+    元の重み W は凍結し、W' = W + scaling * B @ A のみ学習する。
+    B はゼロ初期化するため、学習開始時点では W' = W （事前学習済みの挙動を保持）。
+    """
+
+    def __init__(self, in_features: int, out_features: int, rank: int, alpha: float = 1.0):
+        super().__init__()
+        self.linear = linearNoBias(in_features, out_features)
+        self.lora_A = nn.Linear(in_features, rank, bias=False)
+        self.lora_B = nn.Linear(rank, out_features, bias=False)
+        self.scaling = alpha / rank
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x) + self.scaling * self.lora_B(self.lora_A(x))
 from foundry.training.checkpoint import activation_checkpointing
 from foundry.utils.ddp import RankedLogger
 
@@ -195,14 +215,21 @@ class LocalAttentionPairBias(nn.Module):
         kq_norm=True,
         n_attn_seq_neighbours=2,
         n_attn_keys=128,
+        lora_rank: int = 0,
+        lora_alpha: float = 1.0,
     ):
         super().__init__()
         self.c = c_a  # d_model dim same as input features
         self.n_head = n_head
 
-        self.to_q = linearNoBias(c_a, self.c)
-        self.to_k = linearNoBias(c_a, self.c)
-        self.to_v = linearNoBias(c_a, self.c)
+        if lora_rank > 0:
+            self.to_q = LoRALinear(c_a, self.c, rank=lora_rank, alpha=lora_alpha)
+            self.to_k = LoRALinear(c_a, self.c, rank=lora_rank, alpha=lora_alpha)
+            self.to_v = LoRALinear(c_a, self.c, rank=lora_rank, alpha=lora_alpha)
+        else:
+            self.to_q = linearNoBias(c_a, self.c)
+            self.to_k = linearNoBias(c_a, self.c)
+            self.to_v = linearNoBias(c_a, self.c)
         self.to_b = linearNoBias(c_pair, self.n_head)
         self.to_g = nn.Sequential(
             linearNoBias(c_a, self.c, bias=False),

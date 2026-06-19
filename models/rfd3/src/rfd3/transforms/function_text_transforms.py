@@ -587,12 +587,27 @@ def precompute_embeddings(
     batches = range(0, len(keys), batch_size)
     iterable = _tqdm(batches, desc="Precompute embeddings", unit="batch") if _tqdm else batches
 
+    embed_dim = 768  # PubMedBERT-base hidden size
+
     for batch_idx, start in enumerate(iterable):
         batch_keys = keys[start : start + batch_size]
         batch_texts = texts[start : start + batch_size]
-        embs = _encode_batch(batch_texts)
-        for key, emb in zip(batch_keys, embs):
-            cache[key] = emb
+
+        # 空テキストはゼロベクトル、非空テキストのみ GPU でエンコード
+        nonempty_indices = [i for i, t in enumerate(batch_texts) if t]
+        nonempty_texts = [batch_texts[i] for i in nonempty_indices]
+
+        if nonempty_texts:
+            encoded = _encode_batch(nonempty_texts)
+            encoded_iter = iter(encoded)
+        else:
+            encoded_iter = iter([])
+
+        for i, (key, text) in enumerate(zip(batch_keys, batch_texts)):
+            if text:
+                cache[key] = next(encoded_iter)
+            else:
+                cache[key] = torch.zeros(embed_dim)
 
         processed = start + len(batch_keys)
         if processed % checkpoint_every == 0 or processed == len(keys):

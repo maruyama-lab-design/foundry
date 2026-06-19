@@ -6,6 +6,7 @@ c_atom: 128
 c_atompair: 16
 
 token_initializer: # formerly known as the trunk
+  function_text_emb_dim: 768  # PubMedBERT-base hidden size; 0 to disable
   relative_position_encoding:
     r_max: 32
     s_max: 2
@@ -114,6 +115,7 @@ diffusion_module:
       kq_norm: True
       no_residual_connection_between_attention_and_transition: False
       dropout: 0.10
+      lora_rank: 16   # LoRA rank for Q/K/V; 0 to disable
 
   atom_attention_decoder:
     n_blocks: 3

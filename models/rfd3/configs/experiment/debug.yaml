@@ -12,3 +12,8 @@ ckpt_path: null
 
 trainer:
   prevalidate: True
+
+datasets:
+  train:
+    pdb:
+      probability: 1.0

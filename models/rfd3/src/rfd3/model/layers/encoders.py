@@ -52,11 +52,22 @@ class TokenInitializer(nn.Module):
         atom_1d_features,
         atom_transformer,
         use_chunked_pll=False,  # New parameter for memory optimization
+        function_text_emb_dim: int = 0,
     ):
         super().__init__()
 
         # Store chunked mode flag
         self.use_chunked_pll = use_chunked_pll
+
+        # Function text conditioning (optional)
+        if function_text_emb_dim > 0:
+            self.text_proj = nn.Sequential(
+                RMSNorm(function_text_emb_dim),
+                linearNoBias(function_text_emb_dim, c_s),
+            )
+            # ゼロ初期化ゲート: ファインチューニング開始時点では text conditioning の影響をゼロにし、
+            # 学習とともに徐々に有効化する
+            self.text_gate = nn.Parameter(torch.zeros(1))
 
         # Features
         self.atom_1d_embedder_1 = OneDFeatureEmbedder(atom_1d_features, c_s)
@@ -184,6 +195,11 @@ class TokenInitializer(nn.Module):
             )
             S_I = S_I + self.transition_post_atom(S_I)
             S_I = self.process_s_init(S_I)
+
+            # Function text conditioning: broadcast text embedding to all tokens
+            if hasattr(self, "text_proj") and "function_text_emb" in f:
+                text_emb = f["function_text_emb"].to(S_I.dtype)  # [768]
+                S_I = S_I + self.text_gate.tanh() * self.text_proj(text_emb)
 
             # Embed Z_II
             Z_init_II = self.to_z_init_i(S_I).unsqueeze(-3) + self.to_z_init_j(

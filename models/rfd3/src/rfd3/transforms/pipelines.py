@@ -489,13 +489,13 @@ def build_atom14_base_pipeline_(
         ),
 
         # ★ ここに追加 ──────────────────────────────────────────
-        TrainingRoute(
+        *([TrainingRoute(
             AddFunctionTextEmbedding(
                 annotation_path=function_text_annotation_path,
                 embedding_cache_path=function_text_embedding_cache_path,
                 dropout_prob=0.1,
             )
-        ),
+        )] if function_text_annotation_path is not None else []),
         # ────────────────────────────────────────────────────────
 
 

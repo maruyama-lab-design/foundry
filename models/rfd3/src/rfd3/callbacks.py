@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 from beartype.typing import Any
 
@@ -6,6 +8,81 @@ from foundry.utils.ddp import RankedLogger
 from foundry.utils.logging import print_df_as_table
 
 ranked_logger = RankedLogger(__name__, rank_zero_only=True)
+log = logging.getLogger(__name__)
+
+
+class FreezeBoneAndTrainFunctionTextCallback(BaseCallback):
+    """
+    Function-text conditioning のファインチューニング用 callback。
+
+    on_fit_start で呼ばれ、以下のパラメータ以外をすべて凍結する:
+      - text_proj / text_gate  (TokenInitializer のテキスト投影)
+      - lora_A / lora_B        (LocalAttentionPairBias の LoRA アダプタ)
+    """
+
+    def on_fit_start(self, trainer: Any):
+        model = trainer.model
+        trainable, frozen = 0, 0
+        for name, param in model.named_parameters():
+            if any(key in name for key in ("text_proj", "text_gate", "lora_A", "lora_B")):
+                param.requires_grad = True
+                trainable += param.numel()
+            else:
+                param.requires_grad = False
+                frozen += param.numel()
+
+        total = trainable + frozen
+        log.info(
+            f"[FreezeBoneAndTrainFunctionText] "
+            f"学習対象: {trainable:,} params ({trainable / total * 100:.2f}%) / "
+            f"凍結: {frozen:,} params"
+        )
+
+
+class LogFunctionTextConditioningMetricsCallback(BaseCallback):
+    """
+    Function-text conditioning 固有のメトリクスを wandb にログする callback。
+
+    毎 epoch ログする項目:
+      - finetune/text_gate        : テキスト条件の有効度 (tanh(gate) ∈ [-1, 1])
+      - finetune/lora_norm_mean   : 全 LoRA (B@A) の Frobenius ノルム平均
+      - finetune/trainable_params : 学習対象パラメータ数 (初回のみ)
+    """
+
+    def on_train_epoch_end(self, trainer: Any):
+        if not trainer.fabric.is_global_zero:
+            return
+
+        model = trainer.model
+        metrics: dict[str, float] = {}
+
+        # text_gate: tanh を通した有効値を記録
+        for name, param in model.named_parameters():
+            if "text_gate" in name:
+                metrics["finetune/text_gate"] = param.tanh().item()
+                break
+
+        # LoRA ノルム: B @ A の Frobenius ノルムの平均
+        lora_norms = []
+        lora_layers: dict[str, Any] = {}
+        for name, param in model.named_parameters():
+            layer_key = name.rsplit(".lora_", 1)[0]
+            if ".lora_A" in name:
+                lora_layers.setdefault(layer_key, {})["A"] = param
+            elif ".lora_B" in name:
+                lora_layers.setdefault(layer_key, {})["B"] = param
+
+        for layer_key, ab in lora_layers.items():
+            if "A" in ab and "B" in ab:
+                composed = ab["B"].weight @ ab["A"].weight  # (out, in)
+                lora_norms.append(composed.norm(p="fro").item())
+
+        if lora_norms:
+            import statistics
+            metrics["finetune/lora_norm_mean"] = statistics.mean(lora_norms)
+            metrics["finetune/lora_norm_max"] = max(lora_norms)
+
+        trainer.fabric.log_dict(metrics, step=trainer.state["current_epoch"])
 
 
 class LogDesignValidationMetricsCallback(BaseCallback):

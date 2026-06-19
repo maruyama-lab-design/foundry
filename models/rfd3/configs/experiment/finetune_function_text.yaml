@@ -1,0 +1,37 @@
+# @package _global_
+# Function-text conditioning ファインチューニング用実験設定
+#
+# 使い方:
+#   uv run python models/rfd3/src/rfd3/train.py \
+#       experiment=finetune_function_text \
+#       ckpt_path=/path/to/pretrained.ckpt \
+#       logger=wandb
+
+defaults:
+  - override /logger: wandb   # wandb でログを取る (csv に変更する場合は wandb → csv)
+
+name: finetune-function-text
+tags:
+  - finetune
+  - function-text
+project: aa_design_function_text
+
+# 事前学習チェックポイント (実行時に上書き)
+ckpt_path: null
+
+datasets:
+  train:
+    pdb:
+      probability: 1.0
+
+trainer:
+  # LoRA + text_proj のみ学習するため、学習率は通常より小さく
+  max_epochs: 10000
+  validate_every_n_epochs: 50
+  checkpoint_every_n_epochs: 100
+
+callbacks:
+  freeze_for_function_text:
+    _target_: rfd3.callbacks.FreezeBoneAndTrainFunctionTextCallback
+  log_function_text_metrics:
+    _target_: rfd3.callbacks.LogFunctionTextConditioningMetricsCallback
