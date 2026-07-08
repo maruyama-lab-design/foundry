@@ -74,7 +74,7 @@ class LogFunctionTextConditioningMetricsCallback(BaseCallback):
 
         for layer_key, ab in lora_layers.items():
             if "A" in ab and "B" in ab:
-                composed = ab["B"].weight @ ab["A"].weight  # (out, in)
+                composed = ab["B"] @ ab["A"]  # (out, in)
                 lora_norms.append(composed.norm(p="fro").item())
 
         if lora_norms:
