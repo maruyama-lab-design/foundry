@@ -23,6 +23,12 @@ datasets:
   train:
     pdb:
       probability: 1.0
+      sub_datasets:
+        interface: ~   # interfaces_df.parquet 未作成のため無効化（pn_unit のみ使用）
+  val:
+    unconditional: ~       # ローカル環境に検証データなし
+    unconditional_deep: ~
+    indexed: ~
 
 trainer:
   # LoRA + text_proj のみ学習するため、学習率は通常より小さく

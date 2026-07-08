@@ -21,7 +21,7 @@ class FreezeBoneAndTrainFunctionTextCallback(BaseCallback):
     """
 
     def on_fit_start(self, trainer: Any):
-        model = trainer.model
+        model = trainer.state["model"]
         trainable, frozen = 0, 0
         for name, param in model.named_parameters():
             if any(key in name for key in ("text_proj", "text_gate", "lora_A", "lora_B")):
@@ -53,7 +53,7 @@ class LogFunctionTextConditioningMetricsCallback(BaseCallback):
         if not trainer.fabric.is_global_zero:
             return
 
-        model = trainer.model
+        model = trainer.state["model"]
         metrics: dict[str, float] = {}
 
         # text_gate: tanh を通した有効値を記録
