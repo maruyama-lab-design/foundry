@@ -199,20 +199,47 @@ class AddFunctionTextEmbedding:
 
     def _build_description(self, entry: dict) -> str:
         """
-        InterPro ヒットを "Name: Description" 形式で連結した文字列を返す。
+        UniProt 機能記述 + Subcellular Location + InterPro エントリ名を連結した文字列を返す。
 
-        例:
-            "Globin: The globin superfamily ... | Globin-like: ..."
+        フォーマット:
+            "{UniProt function} | {Subcellular location} | {InterPro name 1} | ..."
+
+        UniProt function がない場合は Subcellular location / InterPro 名のみ。
+        InterPro 名は重複除去する（異なる DB が同名エントリを持つため）。
         """
-        hits = entry.get("interpro", [])
         parts = []
+
+        # 1. UniProt 機能記述（自然言語・最優先）
+        uniprot_func = (entry.get("uniprot_function") or "").strip()
+        if uniprot_func:
+            parts.append(uniprot_func)
+
+        # 2. Subcellular Location（膜タンパク質識別に有効）
+        subcellular = (entry.get("uniprot_subcellular_location") or "").strip()
+        if subcellular:
+            parts.append(subcellular)
+
+        # 3. InterPro エントリ名（重複除去）
+        hits = entry.get("interpro", [])
+        seen_names: set[str] = set()
         for hit in hits:
-            name = hit.get("name", "").strip()
-            desc = hit.get("description", "").strip()
-            if name and desc:
-                parts.append(f"{name}: {desc}")
-            elif name:
-                parts.append(name)
+            name = hit.get("name", "") or ""
+            desc = hit.get("description", "") or ""
+            name = name.strip() if name not in ("None", "none") else ""
+            desc = desc.strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                if desc:
+                    parts.append(f"{name}: {desc}")
+                else:
+                    parts.append(name)
+
+        # 4. UniProt キュレーション品質タグ
+        # Swiss-Prot (手動キュレーション) は 6 文字、TrEMBL (自動注釈) は 10 文字
+        uid = entry.get("uniprot_id", "")
+        if uid:
+            parts.append("[reviewed]" if len(uid) == 6 else "[unreviewed]")
+
         return " | ".join(parts)  # 空のとき "" を返す
 
     # ------------------------------------------------------------------
@@ -559,13 +586,27 @@ def precompute_embeddings(
 
     def _build_text(entry: dict) -> str:
         parts = []
+        uniprot_func = (entry.get("uniprot_function") or "").strip()
+        if uniprot_func:
+            parts.append(uniprot_func)
+        subcellular = (entry.get("uniprot_subcellular_location") or "").strip()
+        if subcellular:
+            parts.append(subcellular)
+        seen_names: set[str] = set()
         for hit in entry.get("interpro", []):
             name = (hit.get("name") or "").strip()
+            if name in ("None", "none"):
+                name = ""
             desc = (hit.get("description") or "").strip()
-            if name and desc:
-                parts.append(f"{name}: {desc}")
-            elif name:
-                parts.append(name)
+            if name and name not in seen_names:
+                seen_names.add(name)
+                if desc:
+                    parts.append(f"{name}: {desc}")
+                else:
+                    parts.append(name)
+        uid = entry.get("uniprot_id", "")
+        if uid:
+            parts.append("[reviewed]" if len(uid) == 6 else "[unreviewed]")
         return " | ".join(parts)
 
     texts = [_build_text(annotations[k]) for k in keys]

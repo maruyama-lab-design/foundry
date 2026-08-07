@@ -534,7 +534,13 @@ class FabricTrainer(ABC):
                 break
 
             self.fabric.call("on_before_train_loader_next", trainer=self)
-            batch = next(train_iter)
+            try:
+                batch = next(train_iter)
+            except (KeyboardInterrupt, StopIteration):
+                raise
+            except Exception as e:
+                ranked_logger.warning(f"Skipping bad batch {batch_idx} (data error): {e}")
+                continue
 
             self.fabric.call(
                 "on_train_batch_start", trainer=self, batch=batch, batch_idx=batch_idx

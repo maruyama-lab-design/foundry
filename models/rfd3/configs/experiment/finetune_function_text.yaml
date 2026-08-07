@@ -29,6 +29,12 @@ datasets:
     unconditional: ~       # ローカル環境に検証データなし
     unconditional_deep: ~
     indexed: ~
+  global_transform_args:
+    meta_conditioning_probabilities:
+      calculate_hbonds: 0.0    # hbplus 未インストールのため無効化
+      add_1d_ss_features: 0.0  # SSE 長不一致エラーが出るため無効化
+      add_ppi_hotspots: 0.0    # pn_unit のみ学習のため PPI 特徴は不要
+      full_binder_crop: 0.0    # 同上
 
 trainer:
   # LoRA + text_proj のみ学習するため、学習率は通常より小さく

@@ -231,11 +231,6 @@ class LogAF3TrainingLossesCallback(BaseCallback):
             safe_print(combined_content)
 
     def on_train_epoch_end(self, trainer):
-        # Gather final epoch means (must be run on all ranks)
-        final_means = {
-            k: tracker.compute().item() for k, tracker in self.loss_trackers.items()
-        }
-
         # Calculate elapsed time and number of batches (from the total_loss tracker, if available)
         elapsed_time = time.time() - self.start_time
         num_batches = (
@@ -243,6 +238,20 @@ class LogAF3TrainingLossesCallback(BaseCallback):
             if "total_loss" in self.loss_trackers
             else trainer.n_batches_per_epoch
         )
+
+        # Skip if no batches were processed (e.g., all batches were skipped due to data errors)
+        if num_batches == 0:
+            self.logger.warning(
+                f"Epoch {trainer.state['current_epoch']}: no batches processed, skipping epoch summary."
+            )
+            for metric in self.loss_trackers.values():
+                metric.reset()
+            return
+
+        # Gather final epoch means (must be run on all ranks)
+        final_means = {
+            k: tracker.compute().item() for k, tracker in self.loss_trackers.items()
+        }
 
         if trainer.fabric.is_global_zero:
             # Create a summary table
@@ -262,7 +271,8 @@ class LogAF3TrainingLossesCallback(BaseCallback):
             table.add_row("Number of Batches", str(num_batches))
             table.add_row("Elapsed Time (s)", f"{elapsed_time:.2f}")
             table.add_row(
-                "Mean Time per Batch (s)", f"{elapsed_time / num_batches:.2f}"
+                "Mean Time per Batch (s)",
+                f"{elapsed_time / num_batches:.2f}" if num_batches > 0 else "N/A",
             )
 
             safe_print(table)
